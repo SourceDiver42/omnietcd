@@ -1,0 +1,71 @@
+name: omni-keytest
+
+networks:
+  omni-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16
+
+services:
+  etcd:
+    image: gcr.io/etcd-development/etcd:v3.5.17
+    container_name: omni-etcd
+    networks:
+      omni-net:
+        ipv4_address: 172.30.0.2
+    command:
+      - /usr/local/bin/etcd
+      - --name=omni-etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=https://0.0.0.0:2379
+      - --advertise-client-urls=https://etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --cert-file=/etcd-certs/server.crt
+      - --key-file=/etcd-certs/server.key
+      - --client-cert-auth
+      - --trusted-ca-file=/etcd-certs/ca.crt
+    volumes:
+      - ./etcd-data:/etcd-data
+      - ./etcd-certs:/etcd-certs:ro
+    ports:
+      - "2379:2379"
+
+  dex:
+    image: dexidp/dex:v2.41.1
+    container_name: omni-dex
+    networks:
+      omni-net:
+        ipv4_address: 172.30.0.3
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    volumes:
+      - ./dex-config.yaml:/etc/dex/config.yaml:ro
+    ports:
+      - "5556:5556"
+
+  omni:
+    image: ghcr.io/siderolabs/omni:latest
+    container_name: omni
+    depends_on:
+      - etcd
+      - dex
+    networks:
+      omni-net:
+        ipv4_address: 172.30.0.10
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    volumes:
+      - ./omni-config.yaml:/config.yaml:ro
+      - ./etcd-certs:/etcd-certs:ro
+      - ./keys/omni.asc:/omni.asc:ro
+      - ./certs/tls.crt:/tls.crt:ro
+      - ./certs/tls.key:/tls.key:ro
+      - ./omni-out:/omni-out
+    command:
+      - --config-path=/config.yaml
+    ports:
+      - "8099:8099"   # API/UI
+      - "8090:8090"   # machine API (SideroLink gRPC)
+      - "8100:8100"   # k8s proxy

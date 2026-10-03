@@ -1,0 +1,29 @@
+# secrets and key material (never commit)
+keys/
+certs/
+etcd-certs/
+talosconfig
+omni-out/
+extracted/
+extracted-python/
+
+# runtime state
+etcd-data/
+
+# compiled tool binaries (built from go-tools/ inside an Omni checkout).
+# Anchored to the repo root so the go-tools/<name>/ source dirs are kept.
+/keyextract
+/importsecrets
+/omnietcd
+/omnictl
+*.exe
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# editor / os
+.DS_Store
+*.swp

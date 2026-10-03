@@ -1,0 +1,70 @@
+account:
+  id: 287cfd52-735b-4dbf-bfc8-c47593e09c3b
+  name: omni
+services:
+  api:
+    endpoint: 0.0.0.0:8099
+    advertisedURL: https://localhost:8099
+    certFile: /tls.crt
+    keyFile: /tls.key
+  metrics:
+    endpoint: 0.0.0.0:2122
+  kubernetesProxy:
+    endpoint: 0.0.0.0:8100
+    advertisedURL: https://localhost:8100
+  machineAPI:
+    endpoint: 0.0.0.0:8090
+    advertisedURL: grpc://172.30.0.10:8090
+  siderolink:
+    wireGuard:
+      endpoint: 0.0.0.0:50180
+      advertisedEndpoint: 172.30.0.10:50180
+    useGRPCTunnel: true
+    eventSinkPort: 8091
+    logServerPort: 8092
+    joinTokensMode: strict
+  workloadProxy:
+    enabled: false
+auth:
+  oidc:
+    enabled: true
+    clientID: omni
+    clientSecret: omni-oidc-secret
+    providerURL: http://dex:5556/dex
+    scopes:
+      - openid
+      - profile
+      - email
+    allowUnverifiedEmail: true
+  initialServiceAccount:
+    enabled: true
+    role: Admin
+    keyPath: /omni-out/initial-sa-key
+    name: automation
+    lifetime: 8760h
+  initialUsers:
+    - admin@example.com
+eulaAccept:
+  name: Example Admin
+  email: admin@example.com
+features:
+  enableClusterImport: true
+  enableConfigDataCompression: true
+logs:
+  audit:
+    enabled: false
+storage:
+  sqlite:
+    path: /omni-out/sqlite.db
+  default:
+    kind: etcd
+    etcd:
+      endpoints:
+        - https://etcd:2379
+      caFile: /etcd-certs/ca.crt
+      certFile: /etcd-certs/client.crt
+      keyFile: /etcd-certs/client.key
+      dialKeepAliveTime: 30s
+      dialKeepAliveTimeout: 5s
+      embedded: false
+      privateKeySource: file:///omni.asc
