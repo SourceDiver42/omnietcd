@@ -1,0 +1,50 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y zstd
+          python -m pip install --upgrade pip cryptography
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+  go-tools:
+    runs-on: ubuntu-latest
+    env:
+      OMNI_REF: v1.12.3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: omnietcd
+      - name: Clone Omni source
+        run: git clone --depth 1 --branch "$OMNI_REF" https://github.com/siderolabs/omni.git omni
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: omni/go.mod
+          cache-dependency-path: omni/go.sum
+      - name: Stage tools into the Omni checkout
+        run: cp -r omnietcd/go-tools/keyextract omnietcd/go-tools/importsecrets omnietcd/go-tools/omnietcd omni/cmd/
+      - name: Build
+        working-directory: omni
+        run: |
+          go build -o dist/keyextract    ./cmd/keyextract
+          go build -o dist/importsecrets ./cmd/importsecrets
+          go build -o dist/omnietcd      ./cmd/omnietcd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omnietcd-tools-linux-amd64
+          path: omni/dist/*
+          if-no-files-found: error
