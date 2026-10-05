@@ -1,0 +1,71 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  OMNI_REF: v1.12.3
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,    goos: linux,  goarch: amd64 }
+          - { runner: ubuntu-24.04-arm, goos: linux,  goarch: arm64 }
+          - { runner: macos-latest,     goos: darwin, goarch: arm64 }
+          - { runner: macos-13,         goos: darwin, goarch: amd64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: omnietcd
+      - name: Clone Omni source
+        run: git clone --depth 1 --branch "$OMNI_REF" https://github.com/siderolabs/omni.git omni
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: omni/go.mod
+          cache-dependency-path: omni/go.sum
+      - name: Stage tools into the Omni checkout
+        run: cp -r omnietcd/go-tools/keyextract omnietcd/go-tools/importsecrets omnietcd/go-tools/omnietcd omni/cmd/
+      - name: Build
+        working-directory: omni
+        run: |
+          mkdir -p dist
+          for t in keyextract importsecrets omnietcd; do
+            go build -trimpath -ldflags "-s -w" -o "dist/$t" "./cmd/$t"
+          done
+          tar -C dist -czf "omnietcd-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" \
+            keyextract importsecrets omnietcd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: omnietcd-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: omni/omnietcd-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          assets=(artifacts/*/*.tar.gz)
+          if [ ${#assets[@]} -eq 0 ]; then
+            echo "no build artifacts produced"; exit 1
+          fi
+          gh release create "${{ github.ref_name }}" "${assets[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes
