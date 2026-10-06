@@ -77,4 +77,8 @@ run the tool inside/next to that container or expose the endpoint.
 |------|---------|
 | `keyextract` | decrypt the whole etcd store, dump secret-bearing resources |
 | `importsecrets` | read a running Talos cluster's secrets, store them in Omni |
-| `omnietcd` | interactive explorer/editor for the encrypted store |
+| `omnietcd` | interactive explorer/editor for the encrypted store; `dump [type] -o dir` writes matching resources as YAML files |
+
+The bundled `extract_talos_config.py` uses the same defaults and flags
+(`--etcd`, `--private-key`, `--etcd-ca/-cert/-key`, `--account-id`, `--insecure`)
+and likewise works against a default embedded Omni with no certs.

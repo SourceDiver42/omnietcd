@@ -317,6 +317,8 @@ func (e *explorer) dispatch(args []string) {
 		e.cmdApply(args[1:])
 	case "raw":
 		e.cmdRaw(args[1:])
+	case "dump":
+		e.cmdDump(args[1:])
 	case "grep", "search":
 		if len(args) < 2 {
 			fmt.Println("usage: grep <regex>")
@@ -374,6 +376,7 @@ func (e *explorer) help() {
   delete <type> <id>                 delete the resource from etcd
   apply -f <file.yaml>               create/update resources from YAML
   raw <type> <id>                    etcd key + raw & decrypted bytes
+  dump [type] [-o dir]               write matching resources as YAML files (default dir omnietcd-dump)
   grep <regex>                       search decrypted YAML across everything
   namespace [ns]                     show/set the active namespace filter ('' = all)
   selector [k=v,...]                 show/set the active label selector
@@ -742,6 +745,51 @@ func (e *explorer) cmdRaw(args []string) {
 	}
 	fmt.Printf("decrypted  : %d bytes (%s)\n", len(plain), note)
 	fmt.Printf("plaintext prefix %x...\n", plain[:min(32, len(plain))])
+}
+
+func (e *explorer) cmdDump(args []string) {
+	typeSub, dir := "", "omnietcd-dump"
+	var pos []string
+	for i := 0; i < len(args); i++ {
+		switch {
+		case (args[i] == "-o" || args[i] == "--out") && i+1 < len(args):
+			dir = args[i+1]
+			i++
+		default:
+			pos = append(pos, args[i])
+		}
+	}
+	if len(pos) > 0 {
+		typeSub = pos[0]
+	}
+	matches := e.match(typeSub, "")
+	if len(matches) == 0 {
+		fmt.Printf("no resources match type~=%q (ns=%q selector=%v)\n", typeSub, e.namespace, e.selector)
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		fmt.Println("mkdir:", err)
+		return
+	}
+	written := 0
+	for _, en := range matches {
+		out, err := resource.MarshalYAML(en.res)
+		if err != nil {
+			continue
+		}
+		b, err := yaml.Marshal(out)
+		if err != nil {
+			continue
+		}
+		md := en.res.Metadata()
+		name := strings.NewReplacer("/", "_", " ", "_").Replace(md.Type() + "__" + md.Namespace() + "__" + md.ID())
+		if err := os.WriteFile(dir+"/"+name+".yaml", b, 0o600); err != nil {
+			fmt.Printf("  write %s: %v\n", name, err)
+			continue
+		}
+		written++
+	}
+	fmt.Printf("wrote %d resource(s) to %s/\n", written, dir)
 }
 
 func (e *explorer) cmdGrep(pat string) {

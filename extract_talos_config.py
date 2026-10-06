@@ -32,16 +32,20 @@ import urllib.request
 from hashlib import sha256
 
 # ----------------------------------------------------------------------------- config
+# Defaults target a default Docker Omni: embedded etcd on http://localhost:2379,
+# plaintext, no client-cert auth. TLS/cert options are only needed for external
+# etcd. All overridable via flags (see main) or the matching env vars.
 RUN = os.path.dirname(os.path.abspath(__file__))
-ACCOUNT_ID = os.environ.get("ACCOUNT_ID", "287cfd52-735b-4dbf-bfc8-c47593e09c3b")
-ETCD = os.environ.get("ETCD_ENDPOINT", "https://127.0.0.1:2379")
-ETCD_CA = os.environ.get("ETCD_CA", f"{RUN}/etcd-certs/ca.crt")
-ETCD_CERT = os.environ.get("ETCD_CERT", f"{RUN}/etcd-certs/client.crt")
-ETCD_KEY = os.environ.get("ETCD_KEY", f"{RUN}/etcd-certs/client.key")
-OMNI_PRIV = os.environ.get("OMNI_PRIVATE_KEY", f"{RUN}/keys/omni.asc")
+ACCOUNT_ID = os.environ.get("ACCOUNT_ID", "")            # "" = auto-discover from etcd
+ETCD = os.environ.get("ETCD_ENDPOINT", "http://127.0.0.1:2379")
+ETCD_CA = os.environ.get("ETCD_CA", "")                  # empty = system roots
+ETCD_CERT = os.environ.get("ETCD_CERT", "")              # empty = no client auth
+ETCD_KEY = os.environ.get("ETCD_KEY", "")
+ETCD_INSECURE = os.environ.get("ETCD_INSECURE", "") != ""
+OMNI_PRIV = os.environ.get("OMNI_PRIVATE_KEY", "omni.asc")
 CLUSTER = os.environ.get("CLUSTER_ID", "imported-cluster")
-CP_ENDPOINT = os.environ.get("CP_ENDPOINT", "https://10.5.0.2:6443")
-OUT = os.environ.get("OUT_DIR", f"{RUN}/extracted-python")
+CP_ENDPOINT = os.environ.get("CP_ENDPOINT", "https://127.0.0.1:6443")
+OUT = os.environ.get("OUT_DIR", "extracted-python")
 
 
 # ----------------------------------------------------------------- minimal protobuf
@@ -106,9 +110,16 @@ def walk_byte_strings(buf, depth=0, out=None):
 
 # ----------------------------------------------------------------------- etcd (HTTP v3)
 def _etcd_ctx():
-    ctx = ssl.create_default_context(cafile=ETCD_CA)
-    ctx.load_cert_chain(ETCD_CERT, ETCD_KEY)
+    # Plaintext endpoint: no TLS context at all (matches a default embedded Omni).
+    if not ETCD.startswith("https://"):
+        return None
+    ctx = ssl.create_default_context(cafile=ETCD_CA or None)
     ctx.check_hostname = False
+    if ETCD_INSECURE:
+        ctx.verify_mode = ssl.CERT_NONE
+    # Client cert only when both parts are given (mutual-TLS etcd).
+    if ETCD_CERT and ETCD_KEY:
+        ctx.load_cert_chain(ETCD_CERT, ETCD_KEY)
     return ctx
 
 
@@ -122,11 +133,15 @@ def prefix_range_end(key: bytes) -> bytes:
     return b""
 
 
-def etcd_range(key: bytes, prefix=False):
+def etcd_range(key: bytes, prefix=False, keys_only=False, limit=0):
     """Return list of (key_bytes, value_bytes). If prefix, range over key*."""
     body = {"key": base64.b64encode(key).decode()}
     if prefix:
         body["range_end"] = base64.b64encode(prefix_range_end(key)).decode()
+    if keys_only:
+        body["keys_only"] = True
+    if limit:
+        body["limit"] = str(limit)
     req = urllib.request.Request(
         f"{ETCD}/v3/kv/range",
         data=json.dumps(body).encode(),
@@ -136,7 +151,7 @@ def etcd_range(key: bytes, prefix=False):
         resp = json.load(r)
     out = []
     for kv in resp.get("kvs", []):
-        out.append((base64.b64decode(kv["key"]), base64.b64decode(kv["value"])))
+        out.append((base64.b64decode(kv["key"]), base64.b64decode(kv.get("value", ""))))
     return out
 
 
@@ -176,13 +191,38 @@ def gpg_decrypt(armored_pgp: bytes, private_key_path: str) -> bytes:
         return p.stdout
 
 
-def recover_master_key() -> bytes:
-    hexhash = sha256(ACCOUNT_ID.encode()).hexdigest()
-    kskey = f"keystore-omni/record-store/{hexhash}".encode()
-    kvs = etcd_range(kskey)
-    if not kvs:
-        raise SystemExit(f"keystore record not found: {kskey.decode()}")
-    slots = parse_keystorage(kvs[0][1])
+def _keystore_record(account_id: str):
+    hexhash = sha256(account_id.encode()).hexdigest()
+    kvs = etcd_range(f"keystore-omni/record-store/{hexhash}".encode())
+    return kvs[0][1] if kvs else None
+
+
+def resolve_account() -> str:
+    """Return the account id whose keystore record exists: the configured one, or
+    one discovered from the /omni/<id>/ resource keyspace (one account per store)."""
+    if ACCOUNT_ID and _keystore_record(ACCOUNT_ID) is not None:
+        return ACCOUNT_ID
+    ids, seen = [], set()
+    for key, _ in etcd_range(b"/omni/", prefix=True, keys_only=True, limit=200):
+        rest = key[len(b"/omni/"):]
+        i = rest.find(b"/")
+        if i > 0:
+            idv = rest[:i].decode()
+            if idv not in seen:
+                seen.add(idv)
+                ids.append(idv)
+    for idv in ids:
+        if _keystore_record(idv) is not None:
+            return idv
+    raise SystemExit(f"keystore record not found (tried account id {ACCOUNT_ID!r}; "
+                     f"discovered {ids} in etcd)")
+
+
+def recover_master_key(account_id: str) -> bytes:
+    record = _keystore_record(account_id)
+    if record is None:
+        raise SystemExit(f"keystore record not found for account id {account_id!r}")
+    slots = parse_keystorage(record)
     if not slots:
         raise SystemExit("no key slots found in keystore record")
     slot_id, enc = next(iter(slots.items()))
@@ -209,9 +249,9 @@ def decrypt_value(master: bytes, value: bytes) -> bytes:
     return plain
 
 
-def extract_bundle(master: bytes):
+def extract_bundle(master: bytes, account_id: str):
     """Find the Talos SecretsBundle YAML inside ImportedClusterSecrets/ClusterSecrets."""
-    prefix_base = f"/omni/{ACCOUNT_ID}/default/".encode()
+    prefix_base = f"/omni/{account_id}/default/".encode()
     for rtype in (b"ImportedClusterSecrets.omni.sidero.dev",
                   b"ClusterSecrets.omni.sidero.dev"):
         for key, value in etcd_range(prefix_base + rtype + b"/", prefix=True):
@@ -233,16 +273,49 @@ def extract_bundle(master: bytes):
 
 
 # --------------------------------------------------------------------------- main
+def parse_args():
+    import argparse
+    p = argparse.ArgumentParser(
+        description="Decrypt a self-hosted Omni etcd store and rebuild a Talos machine config.")
+    p.add_argument("--etcd", default=ETCD, help="etcd endpoint (https:// to enable TLS)")
+    p.add_argument("--private-key", default=OMNI_PRIV,
+                   help="OpenPGP private key Omni uses for etcd (omni.asc)")
+    p.add_argument("--account-id", default=ACCOUNT_ID, help="Omni account id (auto-discovered when empty)")
+    p.add_argument("--etcd-ca", default=ETCD_CA, help="etcd server CA (https only)")
+    p.add_argument("--etcd-cert", default=ETCD_CERT, help="etcd client cert for mutual TLS")
+    p.add_argument("--etcd-key", default=ETCD_KEY, help="etcd client key for mutual TLS")
+    p.add_argument("--insecure", action="store_true", default=ETCD_INSECURE,
+                   help="skip etcd TLS verification")
+    p.add_argument("--cluster", default=CLUSTER, help="cluster name for the generated config")
+    p.add_argument("--endpoint", default=CP_ENDPOINT, help="Kubernetes API endpoint for the generated config")
+    p.add_argument("--out", default=OUT, help="output directory")
+    return p.parse_args()
+
+
 def main():
+    global ETCD, OMNI_PRIV, ACCOUNT_ID, ETCD_CA, ETCD_CERT, ETCD_KEY, ETCD_INSECURE, CLUSTER, CP_ENDPOINT, OUT
+    a = parse_args()
+    ETCD, OMNI_PRIV, ACCOUNT_ID = a.etcd, a.private_key, a.account_id
+    ETCD_CA, ETCD_CERT, ETCD_KEY, ETCD_INSECURE = a.etcd_ca, a.etcd_cert, a.etcd_key, a.insecure
+    CLUSTER, CP_ENDPOINT, OUT = a.cluster, a.endpoint, a.out
+
+    if not os.path.exists(OMNI_PRIV):
+        raise SystemExit(
+            f"private key {OMNI_PRIV!r} not found.\n"
+            "This tool needs the OpenPGP key Omni encrypts its etcd with (the omni.asc\n"
+            "passed to Omni's --private-key-source). Point to it with:\n"
+            "  extract_talos_config.py --private-key /path/to/omni.asc [flags]")
+
     os.makedirs(OUT, exist_ok=True)
     print("=" * 66)
     print(" Omni etcd -> Talos machine config  (pure-Python extraction)")
     print("=" * 66)
     print(f"[*] etcd            : {ETCD}")
-    print(f"[*] account id      : {ACCOUNT_ID}")
 
-    master = recover_master_key()
-    bundle_yaml = extract_bundle(master)
+    account_id = resolve_account()
+    print(f"[*] account id      : {account_id}")
+    master = recover_master_key(account_id)
+    bundle_yaml = extract_bundle(master, account_id)
 
     secrets_path = os.path.join(OUT, "secrets.yaml")
     with open(secrets_path, "w") as f:
