@@ -28,11 +28,13 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"regexp"
 	"sort"
 	"strings"
@@ -319,6 +321,8 @@ func (e *explorer) dispatch(args []string) {
 		e.cmdRaw(args[1:])
 	case "dump":
 		e.cmdDump(args[1:])
+	case "talosconfig", "talos-config":
+		e.cmdTalosconfig(args[1:])
 	case "grep", "search":
 		if len(args) < 2 {
 			fmt.Println("usage: grep <regex>")
@@ -377,6 +381,8 @@ func (e *explorer) help() {
   apply -f <file.yaml>               create/update resources from YAML
   raw <type> <id>                    etcd key + raw & decrypted bytes
   dump [type] [-o dir]               write matching resources as YAML files (default dir omnietcd-dump)
+  talosconfig [cluster] [-o dir] [-endpoint url]   extract the Talos secrets bundle and run
+                                     'talosctl gen config' into dir (default talos-config)
   grep <regex>                       search decrypted YAML across everything
   namespace [ns]                     show/set the active namespace filter ('' = all)
   selector [k=v,...]                 show/set the active label selector
@@ -790,6 +796,121 @@ func (e *explorer) cmdDump(args []string) {
 		written++
 	}
 	fmt.Printf("wrote %d resource(s) to %s/\n", written, dir)
+}
+
+// cmdTalosconfig replicates extract_talos_config.py: pull the Talos secrets
+// bundle out of ImportedClusterSecrets/ClusterSecrets and run `talosctl gen
+// config --with-secrets` to produce controlplane/worker/talosconfig.
+func (e *explorer) cmdTalosconfig(args []string) {
+	dir, endpoint := "talos-config", "https://127.0.0.1:6443"
+	var pos []string
+	for i := 0; i < len(args); i++ {
+		switch {
+		case (args[i] == "-o" || args[i] == "--out") && i+1 < len(args):
+			dir = args[i+1]
+			i++
+		case args[i] == "-endpoint" && i+1 < len(args):
+			endpoint = args[i+1]
+			i++
+		default:
+			pos = append(pos, args[i])
+		}
+	}
+	idSub := ""
+	if len(pos) > 0 {
+		idSub = pos[0]
+	}
+
+	var cands []entry
+	for _, en := range e.all {
+		t := en.res.Metadata().Type()
+		if t != "ImportedClusterSecrets.omni.sidero.dev" && t != "ClusterSecrets.omni.sidero.dev" {
+			continue
+		}
+		if idSub != "" && !strings.Contains(strings.ToLower(en.res.Metadata().ID()), strings.ToLower(idSub)) {
+			continue
+		}
+		cands = append(cands, en)
+	}
+	if len(cands) == 0 {
+		fmt.Println("no ImportedClusterSecrets/ClusterSecrets found (is a cluster present?)")
+		return
+	}
+	if len(cands) > 1 && idSub == "" {
+		fmt.Printf("%d clusters found; pass a cluster id:\n", len(cands))
+		for _, en := range cands {
+			fmt.Printf("  %s / %s\n", en.res.Metadata().Type(), en.res.Metadata().ID())
+		}
+		return
+	}
+	target := cands[0]
+	cluster := target.res.Metadata().ID()
+
+	bundle, err := bundleFromResource(target.res)
+	if err != nil {
+		fmt.Println("extract bundle:", err)
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		fmt.Println("mkdir:", err)
+		return
+	}
+	secretsPath := dir + "/secrets.yaml"
+	if err := os.WriteFile(secretsPath, []byte(bundle), 0o600); err != nil {
+		fmt.Println("write secrets.yaml:", err)
+		return
+	}
+	fmt.Printf("wrote Talos secrets bundle (%d bytes) -> %s\n", len(bundle), secretsPath)
+
+	if _, err := exec.LookPath("talosctl"); err != nil {
+		fmt.Println("talosctl not found on PATH; secrets.yaml written, skipping config generation.")
+		return
+	}
+	cmd := exec.Command("talosctl", "gen", "config", cluster, endpoint,
+		"--with-secrets", secretsPath, "--output-dir", dir, "--force")
+	out, err := cmd.CombinedOutput()
+	os.Stdout.Write(out)
+	if err != nil {
+		fmt.Println("talosctl:", err)
+		return
+	}
+	fmt.Printf("generated Talos machine config in %s/ (signed by the extracted CA)\n", dir)
+}
+
+// bundleFromResource extracts the Talos SecretsBundle YAML from a (Imported)
+// ClusterSecrets resource's spec.data, handling both the plaintext-string form
+// (ImportedClusterSecrets) and the base64/bytes form (ClusterSecrets).
+func bundleFromResource(r resource.Resource) (string, error) {
+	out, err := resource.MarshalYAML(r)
+	if err != nil {
+		return "", err
+	}
+	b, err := yaml.Marshal(out)
+	if err != nil {
+		return "", err
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		return "", err
+	}
+	spec, _ := doc["spec"].(map[string]any)
+	if spec == nil {
+		return "", fmt.Errorf("resource has no spec")
+	}
+	switch v := spec["data"].(type) {
+	case string:
+		if strings.Contains(v, "secretboxencryptionsecret") || strings.Contains(v, "certs:") {
+			return v, nil
+		}
+		if dec, derr := base64.StdEncoding.DecodeString(strings.TrimSpace(v)); derr == nil &&
+			bytes.Contains(dec, []byte("secretboxencryptionsecret")) {
+			return string(dec), nil
+		}
+		if v != "" {
+			return v, nil
+		}
+	}
+	return "", fmt.Errorf("no secrets bundle found in spec.data")
 }
 
 func (e *explorer) cmdGrep(pat string) {

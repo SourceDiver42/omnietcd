@@ -77,8 +77,20 @@ run the tool inside/next to that container or expose the endpoint.
 |------|---------|
 | `keyextract` | decrypt the whole etcd store, dump secret-bearing resources |
 | `importsecrets` | read a running Talos cluster's secrets, store them in Omni |
-| `omnietcd` | interactive explorer/editor for the encrypted store; `dump [type] -o dir` writes matching resources as YAML files |
+| `omnietcd` | interactive explorer/editor for the encrypted store; `dump [type] -o dir` writes matching resources as YAML files; `talosconfig [cluster] -o dir` extracts the Talos secrets and runs `talosctl gen config` |
 
-The bundled `extract_talos_config.py` uses the same defaults and flags
-(`--etcd`, `--private-key`, `--etcd-ca/-cert/-key`, `--account-id`, `--insecure`)
-and likewise works against a default embedded Omni with no certs.
+### Python vs Go for Talos config extraction
+
+`omnietcd talosconfig` and `extract_talos_config.py` do the same thing (secrets
+bundle -> `talosctl gen config`), but reach etcd differently:
+
+- `omnietcd` uses the etcd **gRPC** client, so it works against any etcd,
+  including a **default embedded Omni**.
+- `extract_talos_config.py` uses etcd's **HTTP/JSON gateway** (stdlib only, no
+  deps). A default embedded Omni starts etcd with the gateway **disabled**
+  (`EnableGRPCGateway = false`), so the script gets a 403/404 there. Use it only
+  against etcd with the gateway enabled (e.g. external etcd), or prefer
+  `omnietcd talosconfig` for embedded Omni.
+
+Both share the same flags (`--etcd`, `--private-key`, `--etcd-ca/-cert/-key`,
+`--account-id`, `--insecure`) and the same cert-less defaults.

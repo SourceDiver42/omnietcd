@@ -50,6 +50,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -58,7 +59,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           shopt -s nullglob
-          assets=(artifacts/*/*.tar.gz)
+          assets=(artifacts/*/*.tar.gz extract_talos_config.py)
           if [ ${#assets[@]} -eq 0 ]; then
             echo "no build artifacts produced"; exit 1
           fi
