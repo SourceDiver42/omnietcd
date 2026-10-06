@@ -28,24 +28,30 @@ an Omni source checkout rather than as a standalone module.
 ## Configuration
 
 `keyextract` and `omnietcd` take CLI flags (an env var of the same meaning is the
-default for each, so either works; the flag wins). Defaults resolve against the
-current working directory, so by default run them from the directory that holds
-`etcd-certs/` and `keys/`.
+default for each, so either works; the flag wins). The defaults target a default
+Docker Omni, which runs embedded etcd on `http://localhost:2379` with no TLS and
+no client-cert auth, so usually you only need to point at `omni.asc`.
 
 | flag | env | default | meaning |
 |------|-----|---------|---------|
-| `-etcd` | `ETCD_ENDPOINT` | `https://127.0.0.1:2379` | etcd endpoint (`http://` for plaintext) |
-| `-account-id` | `ACCOUNT_ID` | the test account UUID | Omni account id (defines the etcd key prefix and salt). Auto-discovered from the `/omni/<id>/` keyspace when the given id has no keystore, so it is usually fine to omit. |
-| `-private-key` | `OMNI_PRIVATE_KEY` | `keys/omni.asc` | the OpenPGP private key Omni uses for etcd (`--private-key-source`) |
-| `-etcd-ca` | `ETCD_CA` | `etcd-certs/ca.crt` | etcd server CA (empty = system roots) |
-| `-etcd-cert` | `ETCD_CERT` | `etcd-certs/client.crt` | etcd client cert for mutual TLS (empty disables) |
-| `-etcd-key` | `ETCD_KEY` | `etcd-certs/client.key` | etcd client key for mutual TLS (empty disables) |
+| `-etcd` | `ETCD_ENDPOINT` | `http://127.0.0.1:2379` | etcd endpoint (`https://` to enable TLS) |
+| `-account-id` | `ACCOUNT_ID` | _(auto-discovered)_ | Omni account id (etcd key prefix + salt). Discovered from the `/omni/<id>/` keyspace when empty/wrong, so usually omit it. |
+| `-private-key` | `OMNI_PRIVATE_KEY` | `omni.asc` | the OpenPGP private key Omni uses for etcd (`--private-key-source`) |
+| `-etcd-ca` | `ETCD_CA` | _(empty: system roots)_ | etcd server CA (https only) |
+| `-etcd-cert` | `ETCD_CERT` | _(empty: no client auth)_ | etcd client cert for mutual TLS |
+| `-etcd-key` | `ETCD_KEY` | _(empty: no client auth)_ | etcd client key for mutual TLS |
 | `-insecure` | `ETCD_INSECURE` | off | skip etcd TLS verification |
 
 `keyextract` also has `-out` (`OUT_DIR`, default `extracted`).
 
 ```sh
-omnietcd -private-key /path/to/omni.asc -etcd https://etcd.internal:2379 types
+# default embedded Omni (plaintext etcd): just point at the key
+omnietcd -private-key /path/to/omni.asc types
+
+# external etcd with mutual TLS
+omnietcd -etcd https://etcd.internal:2379 \
+  -etcd-ca ca.crt -etcd-cert client.crt -etcd-key client.key \
+  -private-key /path/to/omni.asc types
 ```
 
 ### About the etcd client cert (`-etcd-cert` / `client.crt`)

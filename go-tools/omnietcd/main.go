@@ -110,12 +110,12 @@ func run() error {
 		privKey   string
 		insecure  bool
 	)
-	flag.StringVar(&etcdEP, "etcd", env("ETCD_ENDPOINT", "https://127.0.0.1:2379"), "etcd endpoint (http:// for plaintext)")
-	flag.StringVar(&accountID, "account-id", env("ACCOUNT_ID", "287cfd52-735b-4dbf-bfc8-c47593e09c3b"), "Omni account id (defines the etcd key prefix and salt)")
-	flag.StringVar(&privKey, "private-key", env("OMNI_PRIVATE_KEY", "keys/omni.asc"), "path to the OpenPGP private key Omni uses for etcd (omni.asc)")
-	flag.StringVar(&caFile, "etcd-ca", env("ETCD_CA", "etcd-certs/ca.crt"), "etcd server CA cert (empty uses the system roots)")
-	flag.StringVar(&certFile, "etcd-cert", env("ETCD_CERT", "etcd-certs/client.crt"), "etcd client cert for mutual TLS (empty disables client auth)")
-	flag.StringVar(&keyFile, "etcd-key", env("ETCD_KEY", "etcd-certs/client.key"), "etcd client key for mutual TLS (empty disables client auth)")
+	flag.StringVar(&etcdEP, "etcd", env("ETCD_ENDPOINT", "http://127.0.0.1:2379"), "etcd endpoint (https:// to enable TLS)")
+	flag.StringVar(&accountID, "account-id", env("ACCOUNT_ID", ""), "Omni account id (auto-discovered from etcd when empty)")
+	flag.StringVar(&privKey, "private-key", env("OMNI_PRIVATE_KEY", "omni.asc"), "path to the OpenPGP private key Omni uses for etcd (omni.asc)")
+	flag.StringVar(&caFile, "etcd-ca", env("ETCD_CA", ""), "etcd server CA cert (empty uses the system roots)")
+	flag.StringVar(&certFile, "etcd-cert", env("ETCD_CERT", ""), "etcd client cert for mutual TLS (empty disables client auth)")
+	flag.StringVar(&keyFile, "etcd-key", env("ETCD_KEY", ""), "etcd client key for mutual TLS (empty disables client auth)")
 	flag.BoolVar(&insecure, "insecure", env("ETCD_INSECURE", "") != "", "skip etcd TLS certificate verification")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: omnietcd [flags] [command [args...]]\n\nFlags:\n")
@@ -134,7 +134,14 @@ func run() error {
 
 	privArmored, err := os.ReadFile(privKey)
 	if err != nil {
-		return err
+		if os.IsNotExist(err) {
+			return fmt.Errorf("private key %q not found.\n"+
+				"omnietcd needs the OpenPGP key Omni encrypts its etcd with (the omni.asc\n"+
+				"passed to Omni's --private-key-source). Point to it with:\n"+
+				"  omnietcd -private-key /path/to/omni.asc [flags] [command]\n"+
+				"Run 'omnietcd -h' for all flags.", privKey)
+		}
+		return fmt.Errorf("read private key %q: %w", privKey, err)
 	}
 	resolvedID, ksValue, err := resolveAccount(ctx, cli, accountID)
 	if err != nil {

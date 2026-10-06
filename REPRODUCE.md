@@ -62,7 +62,11 @@ export TALOSCONFIG=$PWD/talosconfig
 ./importsecrets
 
 # 3. decrypt the whole store and dump the secrets
-./keyextract
+#    (this lab runs external etcd with mutual TLS; a default embedded Omni
+#     needs none of the -etcd-* flags, just -private-key)
+./keyextract -etcd https://127.0.0.1:2379 \
+  -etcd-ca etcd-certs/ca.crt -etcd-cert etcd-certs/client.crt -etcd-key etcd-certs/client.key \
+  -private-key keys/omni.asc
 
 # or, do decrypt + machine-config generation in one step with Python:
 python3 -m venv .venv && ./.venv/bin/pip install cryptography
