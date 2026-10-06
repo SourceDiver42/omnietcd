@@ -13,6 +13,9 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"flag"
 	"fmt"
 	"net/url"
 	"os"
@@ -26,7 +29,6 @@ import (
 	"github.com/cosi-project/runtime/pkg/state/impl/store/compression"
 	"github.com/cosi-project/runtime/pkg/state/impl/store/encryption"
 	etcdstate "github.com/cosi-project/state-etcd/pkg/state/impl/etcd"
-	"go.etcd.io/etcd/client/pkg/v3/transport"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	yaml "go.yaml.in/yaml/v3"
 
@@ -54,14 +56,24 @@ func main() {
 
 func run() error {
 	var (
-		accountID  = env("ACCOUNT_ID", "287cfd52-735b-4dbf-bfc8-c47593e09c3b")
-		etcdEP     = env("ETCD_ENDPOINT", "https://127.0.0.1:2379")
-		caFile     = env("ETCD_CA", "etcd-certs/ca.crt")
-		certFile   = env("ETCD_CERT", "etcd-certs/client.crt")
-		keyFile    = env("ETCD_KEY", "etcd-certs/client.key")
-		privKeyAsc = env("OMNI_PRIVATE_KEY", "keys/omni.asc")
-		outDir     = env("OUT_DIR", "extracted")
+		accountID  string
+		etcdEP     string
+		caFile     string
+		certFile   string
+		keyFile    string
+		privKeyAsc string
+		outDir     string
+		insecure   bool
 	)
+	flag.StringVar(&etcdEP, "etcd", env("ETCD_ENDPOINT", "https://127.0.0.1:2379"), "etcd endpoint (http:// for plaintext)")
+	flag.StringVar(&accountID, "account-id", env("ACCOUNT_ID", "287cfd52-735b-4dbf-bfc8-c47593e09c3b"), "Omni account id (defines the etcd key prefix and salt)")
+	flag.StringVar(&privKeyAsc, "private-key", env("OMNI_PRIVATE_KEY", "keys/omni.asc"), "path to the OpenPGP private key Omni uses for etcd (omni.asc)")
+	flag.StringVar(&caFile, "etcd-ca", env("ETCD_CA", "etcd-certs/ca.crt"), "etcd server CA cert (empty uses the system roots)")
+	flag.StringVar(&certFile, "etcd-cert", env("ETCD_CERT", "etcd-certs/client.crt"), "etcd client cert for mutual TLS (empty disables client auth)")
+	flag.StringVar(&keyFile, "etcd-key", env("ETCD_KEY", "etcd-certs/client.key"), "etcd client key for mutual TLS (empty disables client auth)")
+	flag.StringVar(&outDir, "out", env("OUT_DIR", "extracted"), "directory to write decrypted secret resources to")
+	flag.BoolVar(&insecure, "insecure", env("ETCD_INSECURE", "") != "", "skip etcd TLS certificate verification")
+	flag.Parse()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -69,16 +81,7 @@ func run() error {
 	_ = os.MkdirAll(outDir, 0o755)
 
 	// --- 1. Connect to the same etcd Omni uses ---
-	tlsInfo := transport.TLSInfo{CertFile: certFile, KeyFile: keyFile, TrustedCAFile: caFile}
-	tlsCfg, err := tlsInfo.ClientConfig()
-	if err != nil {
-		return fmt.Errorf("etcd tls: %w", err)
-	}
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:   []string{etcdEP},
-		TLS:         tlsCfg,
-		DialTimeout: 5 * time.Second,
-	})
+	cli, err := dialEtcd(etcdEP, caFile, certFile, keyFile, insecure)
 	if err != nil {
 		return fmt.Errorf("etcd connect: %w", err)
 	}
@@ -211,6 +214,36 @@ func isSecretType(typ string) bool {
 		return true
 	}
 	return strings.Contains(typ, "Secret")
+}
+
+// dialEtcd builds an etcd client. For https:// endpoints the CA (when set)
+// validates the server, and the client cert/key (when both set) enable mutual
+// TLS for etcd configured with --client-cert-auth. http:// connects plaintext.
+func dialEtcd(endpoint, caFile, certFile, keyFile string, insecure bool) (*clientv3.Client, error) {
+	cfg := clientv3.Config{Endpoints: []string{endpoint}, DialTimeout: 5 * time.Second}
+	if strings.HasPrefix(endpoint, "https://") {
+		tc := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: insecure} //nolint:gosec // opt-in via --insecure
+		if caFile != "" {
+			pem, err := os.ReadFile(caFile)
+			if err != nil {
+				return nil, fmt.Errorf("read etcd CA: %w", err)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(pem) {
+				return nil, fmt.Errorf("no certs parsed from etcd CA %q", caFile)
+			}
+			tc.RootCAs = pool
+		}
+		if certFile != "" && keyFile != "" {
+			cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+			if err != nil {
+				return nil, fmt.Errorf("load etcd client cert/key: %w", err)
+			}
+			tc.Certificates = []tls.Certificate{cert}
+		}
+		cfg.TLS = tc
+	}
+	return clientv3.New(cfg)
 }
 
 func dumpSecret(outDir string, r resource.Resource) {
