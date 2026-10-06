@@ -136,18 +136,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	hexHash := fmt.Sprintf("%x", sha256.Sum256([]byte(accountID)))
-	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	ksResp, err := cli.Get(cctx, "keystore-omni/record-store/"+hexHash)
-	cancel()
+	resolvedID, ksValue, err := resolveAccount(ctx, cli, accountID)
 	if err != nil {
 		return err
 	}
-	if len(ksResp.Kvs) == 0 {
-		return fmt.Errorf("keystore record not found")
+	if resolvedID != accountID {
+		fmt.Fprintf(os.Stderr, "note: account id %q had no keystore; using discovered account id %q\n", accountID, resolvedID)
+		accountID = resolvedID
 	}
 	ks := &keystorage.KeyStorage{}
-	if err := ks.UnmarshalBinary(ksResp.Kvs[0].Value); err != nil {
+	if err := ks.UnmarshalBinary(ksValue); err != nil {
 		return err
 	}
 	slot, err := keyprovider.GetIdentityString(string(privArmored))
@@ -183,6 +181,55 @@ func run() error {
 	}
 	ex.dispatch(args)
 	return nil
+}
+
+// resolveAccount finds the Omni account id whose keystore record exists in
+// etcd. It first tries the supplied id, then falls back to discovering it from
+// the /omni/<accountID>/ resource keyspace (a single account per store), so the
+// caller does not have to know the account id up front. Returns the resolved id
+// and the raw keystore record value.
+func resolveAccount(ctx context.Context, cli *clientv3.Client, provided string) (string, []byte, error) {
+	keystore := func(id string) ([]byte, bool) {
+		h := fmt.Sprintf("%x", sha256.Sum256([]byte(id)))
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		r, err := cli.Get(cctx, "keystore-omni/record-store/"+h)
+		if err != nil || len(r.Kvs) == 0 {
+			return nil, false
+		}
+		return r.Kvs[0].Value, true
+	}
+
+	if provided != "" {
+		if v, ok := keystore(provided); ok {
+			return provided, v, nil
+		}
+	}
+
+	// Discover account id(s) from the resource keyspace: /omni/<id>/...
+	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	resp, err := cli.Get(cctx, "/omni/", clientv3.WithPrefix(), clientv3.WithKeysOnly(), clientv3.WithLimit(200))
+	cancel()
+	if err != nil {
+		return "", nil, fmt.Errorf("discover account id: %w", err)
+	}
+	seen := map[string]bool{}
+	var ids []string
+	for _, kv := range resp.Kvs {
+		rest := strings.TrimPrefix(string(kv.Key), "/omni/")
+		if i := strings.IndexByte(rest, '/'); i > 0 {
+			if id := rest[:i]; !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	for _, id := range ids {
+		if v, ok := keystore(id); ok {
+			return id, v, nil
+		}
+	}
+	return "", nil, fmt.Errorf("keystore record not found (tried account id %q; discovered %v in etcd)", provided, ids)
 }
 
 // dialEtcd builds an etcd client. TLS is used for https:// endpoints: the CA

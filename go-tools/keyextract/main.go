@@ -93,19 +93,15 @@ func run() error {
 		return fmt.Errorf("read private key: %w", err)
 	}
 
-	hexHash := fmt.Sprintf("%x", sha256.Sum256([]byte(accountID)))
-	ksKey := "keystore-omni/record-store/" + hexHash
-
-	resp, err := cli.Get(ctx, ksKey)
+	resolvedID, ksValue, err := resolveAccount(ctx, cli, accountID)
 	if err != nil {
-		return fmt.Errorf("get keystore: %w", err)
+		return err
 	}
-	if len(resp.Kvs) == 0 {
-		return fmt.Errorf("keystore record %q not found", ksKey)
-	}
+	accountID = resolvedID
+	ksKey := "keystore-omni/record-store/" + fmt.Sprintf("%x", sha256.Sum256([]byte(accountID)))
 
 	ks := &keystorage.KeyStorage{}
-	if err := ks.UnmarshalBinary(resp.Kvs[0].Value); err != nil {
+	if err := ks.UnmarshalBinary(ksValue); err != nil {
 		return fmt.Errorf("unmarshal keystore: %w", err)
 	}
 
@@ -214,6 +210,50 @@ func isSecretType(typ string) bool {
 		return true
 	}
 	return strings.Contains(typ, "Secret")
+}
+
+// resolveAccount finds the Omni account id whose keystore record exists in
+// etcd: the supplied id first, otherwise discovered from the /omni/<id>/
+// resource keyspace. Returns the resolved id and the raw keystore value.
+func resolveAccount(ctx context.Context, cli *clientv3.Client, provided string) (string, []byte, error) {
+	keystore := func(id string) ([]byte, bool) {
+		h := fmt.Sprintf("%x", sha256.Sum256([]byte(id)))
+		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		r, err := cli.Get(cctx, "keystore-omni/record-store/"+h)
+		if err != nil || len(r.Kvs) == 0 {
+			return nil, false
+		}
+		return r.Kvs[0].Value, true
+	}
+	if provided != "" {
+		if v, ok := keystore(provided); ok {
+			return provided, v, nil
+		}
+	}
+	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	resp, err := cli.Get(cctx, "/omni/", clientv3.WithPrefix(), clientv3.WithKeysOnly(), clientv3.WithLimit(200))
+	cancel()
+	if err != nil {
+		return "", nil, fmt.Errorf("discover account id: %w", err)
+	}
+	seen := map[string]bool{}
+	var ids []string
+	for _, kv := range resp.Kvs {
+		rest := strings.TrimPrefix(string(kv.Key), "/omni/")
+		if i := strings.IndexByte(rest, '/'); i > 0 {
+			if id := rest[:i]; !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	for _, id := range ids {
+		if v, ok := keystore(id); ok {
+			return id, v, nil
+		}
+	}
+	return "", nil, fmt.Errorf("keystore record not found (tried account id %q; discovered %v in etcd)", provided, ids)
 }
 
 // dialEtcd builds an etcd client. For https:// endpoints the CA (when set)

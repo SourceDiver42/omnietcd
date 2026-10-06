@@ -35,7 +35,7 @@ current working directory, so by default run them from the directory that holds
 | flag | env | default | meaning |
 |------|-----|---------|---------|
 | `-etcd` | `ETCD_ENDPOINT` | `https://127.0.0.1:2379` | etcd endpoint (`http://` for plaintext) |
-| `-account-id` | `ACCOUNT_ID` | the test account UUID | Omni account id (defines the etcd key prefix and salt) |
+| `-account-id` | `ACCOUNT_ID` | the test account UUID | Omni account id (defines the etcd key prefix and salt). Auto-discovered from the `/omni/<id>/` keyspace when the given id has no keystore, so it is usually fine to omit. |
 | `-private-key` | `OMNI_PRIVATE_KEY` | `keys/omni.asc` | the OpenPGP private key Omni uses for etcd (`--private-key-source`) |
 | `-etcd-ca` | `ETCD_CA` | `etcd-certs/ca.crt` | etcd server CA (empty = system roots) |
 | `-etcd-cert` | `ETCD_CERT` | `etcd-certs/client.crt` | etcd client cert for mutual TLS (empty disables) |
